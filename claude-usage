@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""CLI to display Claude Pro/Max plan usage, mirroring the /usage command in Claude Code."""
+
+import json
+import http.client
+import sys
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
+USAGE_ENDPOINT = "/api/oauth/usage"
+API_HOST = "api.anthropic.com"
+ANTHROPIC_BETA = "oauth-2025-04-20"
+
+GREEN  = "\033[32m"
+YELLOW = "\033[33m"
+RED    = "\033[31m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+RESET  = "\033[0m"
+
+BAR_WIDTH = 50
+PARTIAL_BLOCKS = ' ▏▎▍▌▋▊▉'
+
+
+def load_token() -> str:
+    if not CREDENTIALS_PATH.exists():
+        sys.exit(f"No credentials found at {CREDENTIALS_PATH}. Run `claude` and log in first.")
+    with open(CREDENTIALS_PATH) as f:
+        creds = json.load(f)
+    oauth = creds.get("claudeAiOauth", {})
+    token = oauth.get("accessToken")
+    if not token:
+        sys.exit("No OAuth access token found. Run `claude` and log in first.")
+    expires_at = oauth.get("expiresAt", 0)
+    if expires_at and expires_at < time.time() * 1000:
+        sys.exit("OAuth token is expired. Run `claude` to refresh it.")
+    return token
+
+
+def fetch_usage(token: str) -> dict:
+    host = os.environ.get("ANTHROPIC_BASE_URL", "").removeprefix("https://").removeprefix("http://") or API_HOST
+    conn = http.client.HTTPSConnection(host, timeout=10)
+    conn.request("GET", USAGE_ENDPOINT, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": ANTHROPIC_BETA,
+        "Content-Type": "application/json",
+        "User-Agent": "claude-usage-cli/1.0",
+    })
+    resp = conn.getresponse()
+    body = resp.read().decode()
+    if resp.status == 429:
+        sys.exit("Rate limited. Please wait a moment and try again.")
+    if resp.status == 401:
+        sys.exit("Authentication failed. Run `claude` to refresh your login.")
+    if resp.status != 200:
+        sys.exit(f"API error {resp.status}: {body[:200]}")
+    return json.loads(body)
+
+
+def get_local_tz_name() -> str:
+    try:
+        tz_link = Path('/etc/localtime')
+        if tz_link.is_symlink():
+            target = str(tz_link.resolve())
+            if 'zoneinfo/' in target:
+                return target.split('zoneinfo/')[-1]
+    except Exception:
+        pass
+    try:
+        tz_file = Path('/etc/timezone')
+        if tz_file.exists():
+            return tz_file.read_text().strip()
+    except Exception:
+        pass
+    return datetime.now().astimezone().tzname() or "local"
+
+
+def parse_resets_at(resets_at) -> datetime:
+    try:
+        return datetime.fromtimestamp(float(resets_at), tz=timezone.utc)
+    except (ValueError, TypeError):
+        return datetime.fromisoformat(str(resets_at))
+
+
+def format_hour(dt: datetime) -> str:
+    return f"{int(dt.strftime('%I'))}{dt.strftime('%p').lower()}"
+
+
+def format_reset_label(resets_at, monthly: bool = False) -> str:
+    dt = parse_resets_at(resets_at).astimezone()
+    tz_name = get_local_tz_name()
+    if monthly:
+        return f"Resets {dt.strftime('%b %-d')} ({tz_name})"
+    delta = dt.timestamp() - time.time()
+    if delta < 24 * 3600:
+        return f"Resets {format_hour(dt)} ({tz_name})"
+    return f"Resets {dt.strftime('%b %-d')}, {format_hour(dt)} ({tz_name})"
+
+
+def next_month_first() -> datetime:
+    now = datetime.now().astimezone()
+    month = now.month % 12 + 1
+    year = now.year + (1 if now.month == 12 else 0)
+    return now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def bar_color(pct: float) -> str:
+    if pct >= 90:
+        return RED
+    if pct >= 70:
+        return YELLOW
+    return GREEN
+
+
+def render_bar(utilization_pct: float, width: int = BAR_WIDTH) -> str:
+    pct = min(utilization_pct, 100.0)
+    filled_exact = pct / 100 * width
+    filled_full = int(filled_exact)
+    partial_idx = round((filled_exact - filled_full) * 8)
+
+    color = bar_color(utilization_pct)
+    bar = '█' * filled_full
+    if 0 < partial_idx < 8 and filled_full < width:
+        bar += PARTIAL_BLOCKS[partial_idx]
+        empty = width - filled_full - 1
+    else:
+        empty = width - filled_full
+    bar += ' ' * empty
+    return f"{color}{bar}{RESET}"
+
+
+def render_limit(title: str, limit: dict) -> None:
+    utilization = limit.get("utilization")
+    resets_at = limit.get("resets_at")
+    if utilization is None:
+        return
+
+    pct = utilization
+    print(f"  {BOLD}{title}{RESET}")
+    bar = render_bar(pct)
+    print(f"  {bar}  {pct:.0f}% used")
+    if resets_at:
+        print(f"  {format_reset_label(resets_at)}")
+    print()
+
+
+def render_extra_usage(extra: dict) -> None:
+    if not extra.get("is_enabled"):
+        return
+    used = extra.get("used_credits")
+    monthly_limit = extra.get("monthly_limit")
+    utilization = extra.get("utilization")
+    resets_at = extra.get("resets_at")
+    if utilization is None or used is None:
+        return
+
+    used_usd = used / 100
+    limit_str = f"${monthly_limit / 100:.2f}" if monthly_limit else "unlimited"
+    spent_str = f"${used_usd:.2f} / {limit_str} spent"
+
+    if resets_at:
+        reset_label = format_reset_label(resets_at, monthly=True)
+    else:
+        reset_label = format_reset_label(next_month_first(), monthly=True)
+
+    print(f"  {BOLD}Extra usage{RESET}")
+    bar = render_bar(utilization)
+    print(f"  {bar}  {utilization:.0f}% used")
+    print(f"  {spent_str} · {reset_label}")
+    print()
+
+
+def main():
+    no_color = not sys.stdout.isatty() or os.environ.get("NO_COLOR")
+    if no_color:
+        for name in ["GREEN", "YELLOW", "RED", "BOLD", "DIM", "RESET"]:
+            globals()[name] = ""
+
+    token = load_token()
+    data = fetch_usage(token)
+
+    if not data:
+        print("Usage data not available (subscription plan may not support /usage).")
+        return
+
+    sub_type = json.loads(open(CREDENTIALS_PATH).read()).get("claudeAiOauth", {}).get("subscriptionType", "")
+    is_max_or_team = sub_type in ("max", "team")
+
+    print()
+    limits = [
+        ("Current session",           data.get("five_hour")),
+        ("Current week (all models)", data.get("seven_day")),
+    ]
+    if is_max_or_team and data.get("seven_day_sonnet"):
+        limits.append(("Current week (Sonnet only)", data.get("seven_day_sonnet")))
+
+    any_limit = False
+    for title, limit in limits:
+        if limit:
+            render_limit(title, limit)
+            any_limit = True
+
+    if not any_limit:
+        print(f"  {DIM}/usage is only available for subscription plans.{RESET}\n")
+        return
+
+    if data.get("extra_usage"):
+        render_extra_usage(data["extra_usage"])
+
+
+if __name__ == "__main__":
+    main()
