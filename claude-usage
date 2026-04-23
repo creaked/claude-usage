@@ -90,15 +90,19 @@ def format_hour(dt: datetime) -> str:
     return f"{int(dt.strftime('%I'))}{dt.strftime('%p').lower()}"
 
 
+def format_month_day(dt: datetime) -> str:
+    return f"{dt.strftime('%b')} {dt.day}"
+
+
 def format_reset_label(resets_at, monthly: bool = False) -> str:
     dt = parse_resets_at(resets_at).astimezone()
     tz_name = get_local_tz_name()
     if monthly:
-        return f"Resets {dt.strftime('%b %-d')} ({tz_name})"
+        return f"Resets {format_month_day(dt)} ({tz_name})"
     delta = dt.timestamp() - time.time()
     if delta < 24 * 3600:
         return f"Resets {format_hour(dt)} ({tz_name})"
-    return f"Resets {dt.strftime('%b %-d')}, {format_hour(dt)} ({tz_name})"
+    return f"Resets {format_month_day(dt)}, {format_hour(dt)} ({tz_name})"
 
 
 def next_month_first() -> datetime:

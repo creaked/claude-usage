@@ -15,7 +15,8 @@ A CLI that mirrors the `/usage` command in Claude Code, showing your Pro/Max pla
 ```bash
 git clone https://github.com/creaked/claude-usage
 chmod +x claude-usage/claude-usage
-ln -s "$PWD/claude-usage/claude-usage" ~/.local/bin/claude-usage
+ln -s "$PWD/claude-usage/claude-usage" ~/.local/bin/claude-usage  # Linux
+ln -s "$PWD/claude-usage/claude-usage" /usr/local/bin/claude-usage  # macOS
 ```
 
 ## Usage
